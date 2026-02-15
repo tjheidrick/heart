@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Interactive k Slider (iOS optimized)</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #0b0b0b;
+      color: #f2f2f2;
+      font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      -webkit-text-size-adjust: 100%;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: env(safe-area-inset-top) 14px env(safe-area-inset-bottom) 14px;
+      box-sizing: border-box;
+      gap: 10px;
+    }
+    .title {
+      width: min(980px, 100%);
+      font-size: 16px;
+      line-height: 1.35;
+      opacity: 0.95;
+      margin-top: 6px;
+    }
+    .formula {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 13px;
+      opacity: 0.9;
+      margin-top: 4px;
+      word-break: break-word;
+    }
+    .card {
+      width: min(980px, 100%);
+      background: #111;
+      border: 1px solid #2a2a2a;
+      border-radius: 14px;
+      padding: 12px;
+      box-sizing: border-box;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+    }
+    canvas {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 10px;
+      background: #000;
+      touch-action: none; /* avoid scroll/zoom gesture conflicts over canvas */
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .kreadout {
+      font-variant-numeric: tabular-nums;
+      font-size: 14px;
+      opacity: 0.95;
+      padding: 8px 10px;
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      background: #0d0d0d;
+      min-width: 86px;
+      text-align: center;
+      user-select: none;
+    }
+    input[type="range"] {
+      width: 100%;
+      height: 44px;                 /* iOS touch target */
+      -webkit-appearance: none;
+      appearance: none;
+      background: transparent;
+      margin: 0;
+    }
+    /* Track */
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 6px;
+      background: #2a2a2a;
+      border-radius: 999px;
+    }
+    input[type="range"]::-moz-range-track {
+      height: 6px;
+      background: #2a2a2a;
+      border-radius: 999px;
+    }
+    /* Thumb */
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      background: #ff3b30;          /* iOS-ish red */
+      border: 2px solid rgba(255,255,255,0.25);
+      margin-top: -11px;            /* centers thumb on track */
+      box-shadow: 0 4px 10px rgba(0,0,0,0.45);
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      background: #ff3b30;
+      border: 2px solid rgba(255,255,255,0.25);
+      box-shadow: 0 4px 10px rgba(0,0,0,0.45);
+    }
+    .hint {
+      margin-top: 6px;
+      font-size: 12px;
+      opacity: 0.75;
+    }
+  </style>
+</head>
+<body>
+  <div class="title">
+    <div><strong>Interactive k</strong> (retina canvas, touch-friendly slider, iOS Safari tuned)</div>
+    <div class="formula">y = |x|^(2/3) + 0.9 · sin(kx) · √(3 − x²),  x ∈ [−√3, √3]</div>
+  </div>
+
+  <div class="card">
+    <canvas id="plot" aria-label="Plot"></canvas>
+
+    <div class="controls">
+      <input id="kSlider" type="range" min="0" max="1" step="0.001" value="0" />
+      <div class="kreadout">k = <span id="kValue">1</span></div>
+    </div>
+    <div class="hint">Slider is logarithmic for better control: left is calm, right is chaos (up to 1000).</div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("plot");
+  const ctx = canvas.getContext("2d", { alpha: false }); // faster on iOS
+  const slider = document.getElementById("kSlider");
+  const kValueEl = document.getElementById("kValue");
+
+  // Math bounds
+  const xmin = -Math.sqrt(3);
+  const xmax =  Math.sqrt(3);
+  const ymin = -2;
+  const ymax =  3;
+
+  // Sampling
+  // Adaptive: fewer points for low k, more for high k (but capped for performance)
+  function stepsForK(k) {
+    // Roughly proportional to frequency; clamp for safety.
+    // iOS Safari will stay happier below ~12k points per frame.
+    const base = 1800;
+    const extra = Math.min(10000, Math.floor(k * 6)); // k=1000 => +6000
+    return Math.min(12000, base + extra);
+  }
+
+  function yFunc(x, k) {
+    const a = Math.pow(Math.abs(x), 2/3);
+    const inside = Math.max(0, 3 - x*x);
+    return a + 0.9 * Math.sin(k * x) * Math.sqrt(inside);
+  }
+
+  // Log slider mapping: slider t in [0,1] -> k in [1,1000]
+  function kFromT(t) {
+    const kmin = 1, kmax = 1000;
+    const logMin = Math.log10(kmin);
+    const logMax = Math.log10(kmax);
+    const logK = logMin + (logMax - logMin) * t;
+    return Math.pow(10, logK);
+  }
+
+  // Retina / DPR scaling + responsive canvas sizing
+  function resizeCanvas() {
+    const cardWidth = canvas.clientWidth || Math.min(980, window.innerWidth - 28);
+    const targetW = Math.floor(cardWidth);
+    const targetH = Math.floor(targetW * 0.55); // aspect ratio tuned for phones
+
+    const dpr = Math.min(3, window.devicePixelRatio || 1); // cap DPR for performance
+    canvas.width  = Math.floor(targetW * dpr);
+    canvas.height = Math.floor(targetH * dpr);
+    canvas.style.width  = targetW + "px";
+    canvas.style.height = targetH + "px";
+
+    // Reset transform and scale to DPR
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // After setTransform, our drawing coords are in CSS pixels.
+  }
+
+  function toPxX(x, w) { return (x - xmin) / (xmax - xmin) * w; }
+  function toPxY(y, h) { return h - (y - ymin) / (ymax - ymin) * h; }
+
+  function drawAxes(w, h) {
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "#222";
+    ctx.beginPath();
+
+    // x-axis at y=0
+    const y0 = toPxY(0, h);
+    ctx.moveTo(0, y0);
+    ctx.lineTo(w, y0);
+
+    // y-axis at x=0
+    const x0 = toPxX(0, w);
+    ctx.moveTo(x0, 0);
+    ctx.lineTo(x0, h);
+
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function clear(w, h) {
+    ctx.save();
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+  }
+
+  let pending = false;
+  let latestT = parseFloat(slider.value);
+
+  function render() {
+    pending = false;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+
+    const k = kFromT(latestT);
+    const kInt = Math.max(1, Math.round(k));
+    kValueEl.textContent = String(kInt);
+
+    clear(w, h);
+    drawAxes(w, h);
+
+    // Plot
+    ctx.save();
+    ctx.strokeStyle = "#ff3b30"; // red
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+
+    const steps = stepsForK(kInt);
+    for (let i = 0; i <= steps; i++) {
+      const x = xmin + (xmax - xmin) * i / steps;
+      const y = yFunc(x, kInt);
+      const px = toPxX(x, w);
+      const py = toPxY(y, h);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function requestRender() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(render);
+  }
+
+  // iOS-friendly input handling (passive + rAF)
+  const onSlider = (e) => {
+    latestT = parseFloat(e.target.value);
+    requestRender();
+  };
+
+  slider.addEventListener("input", onSlider, { passive: true });
+  slider.addEventListener("change", onSlider, { passive: true });
+
+  // Resize handling
+  const onResize = () => {
+    resizeCanvas();
+    requestRender();
+  };
+  window.addEventListener("resize", onResize, { passive: true });
+  window.addEventListener("orientationchange", onResize, { passive: true });
+
+  // Initial
+  // Give layout a tick, then size correctly.
+  requestAnimationFrame(() => {
+    resizeCanvas();
+    requestRender();
+  });
+})();
+</script>
+</body>
+</html>
